@@ -20,4 +20,6 @@
 
 脚本依赖 git、bash 和 Python 3.9 及以上，不需要第三方包。`snapshot.sh` 与 `check_docs.py` 会复制到目标项目，`render.py` 只在生成时使用。
 
+## 许可
 
+本项目以 [MIT 协议](LICENSE) 发布。
