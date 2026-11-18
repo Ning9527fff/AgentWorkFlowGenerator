@@ -17,6 +17,8 @@ JSON 对象。字符串中的 `@@路径@@`（相对目标项目根目录）在�
 | `domain_checks` | 否 | 领域审查要点数组，每项 `{capability, checks, source}` |
 | `migration` | 否 | 迁移项目时填写 `{plan, test_cmd}`：`plan` 是迁移规划的说明与链接，`test_cmd` 是运行旧实现测试的命令 |
 | `existing_collab` | 否 | 已有协作文件的处理说明，每项一行 Markdown |
+| `tools` | 否 | 生成子 agent 定义的工具数组，取值 `claude`、`codex`；省略时只生成工具无关的规范 |
+| `models` | 否 | 按工具和角色指定模型，如 `{"claude": {"architect": "fable", "coder": "opus", "reviewer": "opus"}}`；角色为 `architect`、`coder`、`reviewer`，未填写的角色继承主会话模型。模型名写该工具接受的值，生成器不校验是否存在 |
 | `replace`、`skip` | 否 | 目标项目中已存在、要替换或保留的生成路径；未声明的已存在文件视为冲突 |
 
 `languages` 每项：
@@ -48,6 +50,9 @@ JSON 对象。字符串中的 `@@路径@@`（相对目标项目根目录）在�
 | `{{HIGH_RISK_AREAS}}` `{{DOMAIN_CHECKS}}` | 对应数组，每项一行表格 |
 | `{{MIGRATION_PLAN}}` `{{MIGRATION_TEST_CMD}}` | `migration` 的 `plan`、`test_cmd` |
 | `{{EXISTING_COLLAB}}` | `existing_collab`，每项一行 |
+| `{{CLAUDE_ARCHITECT_MODEL}}` `{{CODEX_ARCHITECT_MODEL}}` | `models.<工具>.architect`，未填写时为“继承” |
+| `{{CLAUDE_AGENT_ROWS}}` `{{CODEX_AGENT_ROWS}}` | 该工具的子 agent 表，每个 agent 一行：名称、角色、模型 |
+| `{{AGENT_NAME}}` `{{AGENT_NAME_TOML}}` `{{AGENT_DESCRIPTION}}` `{{AGENT_MODEL_LINE}}` `{{AGENT_TOOLS_LINE}}` `{{AGENT_SKILL_LINK}}` `{{AGENT_SKILL_PATH}}` | 只用于 `tools/` 下的 agent 定义模板，由 `render.py` 的 `agent_values` 按每个 agent 生成；描述取对应 skill 的 `description` |
 
 模板中出现没有值的占位符时，`render.py` 报错并停止，不写入任何文件。新增占位符时，同时修改 `render.py` 的 `values` 函数和本表。
 
@@ -68,6 +73,7 @@ JSON 对象。字符串中的 `@@路径@@`（相对目标项目根目录）在�
 | `迁移项目` | 填写了 `migration` |
 | `单语言`、`多语言` | `languages` 为一种，或两种及以上 |
 | `有已有协作文件` | `existing_collab` 非空 |
+| `使用Claude`、`使用Codex` | `tools` 包含 `claude`、`codex` |
 
 ## 默认目录与生成条件
 
@@ -80,16 +86,23 @@ JSON 对象。字符串中的 `@@路径@@`（相对目标项目根目录）在�
 | `coding-index.md` | `.agents/<语言 id>/coding-index.md`（L2） | 每种语言一份 |
 | `topics/style.md`、`topics/toolchain.md` | `.agents/<语言 id>/` 下同名（L3，语言专用） | 每种语言一份 |
 | `topics/` 中其余专题 | `.agents/references/` 下同名（L3，各语言共用） | 总是；以下除外：`high-risk-areas.md` 仅在有高风险区域时生成，`domain-checks.md` 仅在有领域要点时生成，`migration-comparison.md` 仅在迁移项目时生成 |
+| `roles/coder.md` | `.agents/skills/<project>-coder/SKILL.md` | 总是 |
 | `review/single-reviewer.md` | `.agents/skills/<project>-review/SKILL.md` | 档位=轻量 |
 | `review/coordinator.md` | `.agents/skills/<project>-review-coordinator/SKILL.md` | 档位=标准、严格，或轻量升档 |
 | `review/code-review.md` | `.agents/skills/<project>-code-review/SKILL.md` | 总是 |
 | `review/behavior-verification.md` | `.agents/skills/<project>-behavior-verification/SKILL.md` | 总是 |
 | `review/style-review.md` | `.agents/skills/<project>-style-review/SKILL.md` | 档位=严格 |
-| `agent-record/README.md`、`agent-record/_template.md` | `.agents/agentRecord/` 下同名 | 总是 |
+| `decisions/README.md`、`decisions/_template.md` | `.agents/decisions/` 下同名 | 总是 |
+| `agent-record/README.md`、`agent-record/_template.md`、`agent-record/_contract-template.md` | `.agents/agentRecord/` 下同名 | 总是 |
+| `tools/CLAUDE.md` | `CLAUDE.md`，导入 `AGENTS.md` | `tools` 包含 `claude` |
+| `tools/claude-agent.md` | `.claude/agents/<project>-<职能>.md`，Coder 与各审查职能各一份（不含协调者） | `tools` 包含 `claude` |
+| `tools/codex-agent.toml` | `.codex/agents/<project>-<职能>.toml`，同上 | `tools` 包含 `codex` |
 | `../scripts/snapshot.sh`、`../scripts/check_docs.py` | `.agents/scripts/` 下同名，原样复制 | 总是 |
 | 层级映射 `levels.json` | `.agents/scripts/levels.json`，由 `check_docs.py --init` 生成 | 总是 |
 | 配置副本 | `.agents/scripts/workflow-config.json`，去掉 `replace`、`skip`，风格规则内联 | 总是 |
 
-skill 文件通过 L0 的路由读取，不依赖工具的自动发现机制。用户需要某个工具自动加载时，可在交付后另行建立链接，生成器不为特定工具生成目录。
+skill 文件通过 L0 的路由读取，不依赖工具的自动发现机制。配置了 `tools` 时，生成器为该工具生成子 agent 定义，用于指定模型和工具权限；定义只是薄包装，执行内容指向对应 skill，规则正文只在 skill 中维护一份。审查协调者由主会话担任，不生成 agent 定义。
+
+`.agents/decisions/` 中的 ADR、`.agents/agentRecord/` 中的任务记录与契约不是规范文件，`check_docs.py` 不把它们计入层级映射；两处的 README 是规范文件。
 
 轻量档总是生成代码审查与行为验证两个 skill：单个审查者依次执行它们，升档时协调者直接分派它们，检查内容只维护一份。

@@ -13,6 +13,10 @@
 
 审查分支：L1 路由到协调 skill，协调 skill 指定职能 skill，职能 skill 路由到 L2 并独立选读 L3。轻量档没有协调者，L1 直接路由到单个审查者 skill。
 
+实现分支：L0 路由到 Coder skill（与审查 skill 同为 L2），Coder skill 路由到 L2 编码索引并独立选读 L3。Coder 的需求依据是任务契约，契约和 ADR 都是证据文档，不是规范文件，不计入层级。
+
+Claude Code 与 Codex 的子 agent 定义（`.claude/agents/`、`.codex/agents/`）只指定模型和工具并指向对应 skill，不属于本结构，也不由自检脚本检查。
+
 允许的合并：项目只有一种主语言时，L1 可以并入 L0；L2 与 L3 必须分开，不能把专题正文写进索引。
 
 ## 路由链接与证据链接

@@ -39,6 +39,14 @@ DEFAULT_GATE = {
 }
 PENDING = "待确认"
 
+TOOLS = ("claude", "codex")
+INHERIT = "继承"
+# 可配置模型的角色；architect 是主会话，只写入建议，不生成 agent 定义。
+ROLES = ("architect", "coder", "reviewer")
+# Claude Code 审查 agent 不给 Edit、Write；Coder 用默认的全部工具。
+CLAUDE_REVIEW_TOOLS = "Read, Grep, Glob, Bash"
+MODEL_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]+$")
+
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 COND_RE = re.compile(r"^<!--\s*条件:\s*(.+?)\s*-->\n(.*?)^<!--\s*/条件\s*-->\n", re.S | re.M)
 COND_MARK_RE = re.compile(r"<!--\s*/?条件")
@@ -95,6 +103,24 @@ def validate_basics(cfg, errors):
     for key in ("replace", "skip", "existing_collab", "contract_docs", *TABLE_LISTS):
         if not isinstance(cfg.setdefault(key, []), list):
             errors.append(f"{key} 须为数组")
+
+    tools = cfg.setdefault("tools", [])
+    if not isinstance(tools, list) or any(x not in TOOLS for x in tools):
+        errors.append(f"tools 须为数组，取值 {'、'.join(TOOLS)}")
+
+    models = cfg.setdefault("models", {})
+    if not isinstance(models, dict):
+        errors.append("models 须为对象")
+    else:
+        for tool, roles in models.items():
+            if tool not in TOOLS or not isinstance(roles, dict):
+                errors.append(f"models.{tool}：键须为 {'、'.join(TOOLS)}，值为“角色: 模型”对象")
+                continue
+            for role, model in roles.items():
+                if role not in ROLES:
+                    errors.append(f"models.{tool}.{role}：角色须为 {'、'.join(ROLES)}")
+                elif not isinstance(model, str) or not MODEL_RE.match(model):
+                    errors.append(f"models.{tool}.{role}：模型名只能包含字母、数字和 . _ : - [ ]")
 
     migration = cfg.get("migration")
     if migration is not None and (not isinstance(migration, dict) or not migration.get("plan")):
@@ -195,6 +221,10 @@ def conditions(cfg):
         conds.add("迁移项目")
     if cfg["existing_collab"]:
         conds.add("有已有协作文件")
+    if "claude" in cfg["tools"]:
+        conds.add("使用Claude")
+    if "codex" in cfg["tools"]:
+        conds.add("使用Codex")
     return conds
 
 
@@ -220,20 +250,97 @@ def plan_files(cfg, conds):
             continue
         files.append((f".agents/references/{name}.md", f"topics/{name}.md", None))
 
-    tier = cfg["tier"]
-    skills = [("code-review", "code-review"), ("behavior-verification", "behavior-verification")]
-    if tier == "轻量":
-        skills.append(("single-reviewer", "review"))
-    if tier != "轻量" or "轻量升档" in conds:
-        skills.append(("coordinator", "review-coordinator"))
-    if tier == "严格":
-        skills.append(("style-review", "style-review"))
-    for template, name in skills:
-        files.append((f".agents/skills/{cfg['project']}-{name}/SKILL.md", f"review/{template}.md", None))
+    for template, name in skill_list(cfg, conds):
+        files.append((f".agents/skills/{cfg['project']}-{name}/SKILL.md", template, None))
 
+    files.append((".agents/decisions/README.md", "decisions/README.md", None))
+    files.append((".agents/decisions/_template.md", "decisions/_template.md", None))
     files.append((".agents/agentRecord/README.md", "agent-record/README.md", None))
     files.append((".agents/agentRecord/_template.md", "agent-record/_template.md", None))
+    files.append((".agents/agentRecord/_contract-template.md", "agent-record/_contract-template.md", None))
+
+    if "claude" in cfg["tools"]:
+        files.append(("CLAUDE.md", "tools/CLAUDE.md", None))
+    for agent in tool_agents(cfg, conds):
+        files.append((agent["dest"], agent["template"], agent))
     return files
+
+
+def skill_list(cfg, conds):
+    """返回 (模板, skill 名后缀)：Coder 与各审查 skill。"""
+    tier = cfg["tier"]
+    skills = [("roles/coder.md", "coder"),
+              ("review/code-review.md", "code-review"),
+              ("review/behavior-verification.md", "behavior-verification")]
+    if tier == "轻量":
+        skills.append(("review/single-reviewer.md", "review"))
+    if tier != "轻量" or "轻量升档" in conds:
+        skills.append(("review/coordinator.md", "review-coordinator"))
+    if tier == "严格":
+        skills.append(("review/style-review.md", "style-review"))
+    return skills
+
+
+def model_of(cfg, tool, role):
+    return cfg["models"].get(tool, {}).get(role) or INHERIT
+
+
+def tool_agents(cfg, conds):
+    """子 agent 定义：Coder 与审查职能各一个。协调者由主会话担任，不生成定义。"""
+    agents = []
+    for template, suffix in skill_list(cfg, conds):
+        if suffix == "review-coordinator":
+            continue
+        name = f"{cfg['project']}-{suffix}"
+        role = "coder" if suffix == "coder" else "reviewer"
+        for tool in cfg["tools"]:
+            claude = tool == "claude"
+            agents.append({
+                "tool": tool, "name": name, "role": role,
+                "skill": f".agents/skills/{name}/SKILL.md",
+                "dest": f".claude/agents/{name}.md" if claude else f".codex/agents/{name}.toml",
+                "template": "tools/claude-agent.md" if claude else "tools/codex-agent.toml",
+                "description": read_description(template, cfg["project"]),
+                "model": model_of(cfg, tool, role),
+            })
+    return agents
+
+
+def read_description(template, project):
+    text = (TEMPLATES / template).read_text(encoding="utf-8")
+    match = re.search(r"^description:\s*(.+)$", text, re.M)
+    return match.group(1).replace("{{PROJECT}}", project).strip() if match else project
+
+
+def quoted(value):
+    """JSON 字符串同时是合法的 YAML 双引号字符串和 TOML 基本字符串。"""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def agent_values(agent):
+    model = agent["model"]
+    if agent["tool"] == "claude":
+        return {
+            "AGENT_NAME": agent["name"],
+            "AGENT_DESCRIPTION": quoted(agent["description"]),
+            "AGENT_MODEL_LINE": f"model: {'inherit' if model == INHERIT else model}",
+            "AGENT_TOOLS_LINE": "" if agent["role"] == "coder" else f"tools: {CLAUDE_REVIEW_TOOLS}",
+            "AGENT_SKILL_LINK": f"@@{agent['skill']}@@",
+        }
+    return {
+        "AGENT_NAME_TOML": quoted(agent["name"]),
+        "AGENT_DESCRIPTION": quoted(agent["description"]),
+        "AGENT_MODEL_LINE": "" if model == INHERIT else f"model = {quoted(model)}",
+        "AGENT_SKILL_PATH": agent["skill"],
+    }
+
+
+def agent_rows(cfg, conds, tool):
+    names = {"coder": "Coder", "reviewer": "审查职能"}
+    return "\n".join(
+        f"| `{a['name']}` | {names[a['role']]} | {a['model']} |"
+        for a in tool_agents(cfg, conds) if a["tool"] == tool
+    )
 
 
 def other_outputs():
@@ -271,7 +378,7 @@ def dirs_text(lang):
     return "、".join(f"`{d}`" for d in lang["dirs"])
 
 
-def values(cfg, lang):
+def values(cfg, lang, conds):
     """占位符的值；@@路径@@ 在 render 中按目标文件换算。"""
     langs = cfg["languages"]
     migration = cfg.get("migration") or {}
@@ -282,7 +389,7 @@ def values(cfg, lang):
         "BLOCKING_LEVELS": BLOCKING[cfg["tier"]],
         "CONTRACT_DOCS": "\n".join(
             f"- [{d['name']}](@@{d['path']}@@)：{d['scope']}" for d in cfg["contract_docs"]
-        ) or f"- {PENDING}：扫描未找到业务契约文档",
+        ) or f"- {PENDING}：扫描未找到业务契约文档；需要时由 Architect 向用户确认，确认后补入本页",
         "LANG_ROUTES": "\n".join(
             f"| {l['name']} 代码开发、测试、迁移或运行配置（{dirs_text(l)}） | [{l['name']} 入口](@@.agents/{l['id']}/entry.md@@) |"
             for l in langs
@@ -296,7 +403,17 @@ def values(cfg, lang):
         "MIGRATION_PLAN": migration.get("plan", ""),
         "MIGRATION_TEST_CMD": migration.get("test_cmd") or PENDING,
         "EXISTING_COLLAB": "\n".join(cfg["existing_collab"]),
+        # 主会话的模型由用户启动会话时选择，这里只是建议
+        "CLAUDE_ARCHITECT_MODEL": cfg["models"].get("claude", {}).get("architect") or "未指定",
+        "CODEX_ARCHITECT_MODEL": cfg["models"].get("codex", {}).get("architect") or "未指定",
+        "CLAUDE_AGENT_ROWS": agent_rows(cfg, conds, "claude"),
+        "CODEX_AGENT_ROWS": agent_rows(cfg, conds, "codex"),
     }
+
+    if lang is not None and "tool" in lang:
+        # plan_files 对 agent 定义传入的是 agent 描述而不是语言
+        vals.update(agent_values(lang))
+        return vals
 
     if lang is not None:
         vals.update({
@@ -346,7 +463,7 @@ def render(template, dest, vals, conds):
 
 def render_all(cfg, conds):
     return {
-        dest: render(template, dest, values(cfg, lang), conds)
+        dest: render(template, dest, values(cfg, lang, conds), conds)
         for dest, template, lang in plan_files(cfg, conds)
     }
 
@@ -356,7 +473,8 @@ def render_all(cfg, conds):
 def print_plan(rendered, status):
     print(f"{'处理':<4} {'层级':<4} 路径")
     for dest in list(rendered) + other_outputs():
-        level = f"L{default_level(Path(dest))}" if dest.endswith(".md") else "-"
+        spec = dest == "AGENTS.md" or (dest.startswith(".agents/") and dest.endswith(".md"))
+        level = f"L{default_level(Path(dest))}" if spec else "-"
         print(f"{status[dest]:<4} {level:<4} {dest}")
 
     conflicts = [d for d, s in status.items() if s == "冲突"]
@@ -364,6 +482,8 @@ def print_plan(rendered, status):
         print("\n以下文件已存在，须在配置的 replace 或 skip 中声明：")
         for dest in conflicts:
             print(f"  - {dest}")
+    if status.get("CLAUDE.md") == "跳过":
+        print("\n提示：保留了已有的 CLAUDE.md，需要在其中加入一行 @AGENTS.md，Claude Code 才会读取项目入口。")
     if status.get("AGENTS.md") == "跳过":
         print("\n提示：保留了已有的 AGENTS.md，需要手工把新生成的路由合并进去（可用 --print AGENTS.md 查看）。")
 

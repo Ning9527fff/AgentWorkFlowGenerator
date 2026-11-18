@@ -8,7 +8,7 @@
   python3 check_docs.py [根目录] --update            文件改名、移动、删除或修改后刷新映射
 退出码：0 表示没有错误（可能有警告），1 表示存在错误或命令失败。
 
-规范文件：根目录 AGENTS.md 与 .agents/ 下的 Markdown，不含 agentRecord/ 中的任务记录。
+规范文件：根目录 AGENTS.md 与 .agents/ 下的 Markdown，不含 agentRecord/ 中的任务记录与契约、decisions/ 中的 ADR。
 
 层级（数字越小越靠上游）记录在 .agents/scripts/levels.json，以相对路径为键，
 每项保存层级与文件内容的 MD5。检查时按路径查层级；路径查不到时，用 MD5 在映射中
@@ -59,9 +59,12 @@ def find_root(arg):
     return Path(out.stdout.strip())
 
 
+RECORD_DIRS = ("agentRecord", "decisions")
+
+
 def is_record(rel):
-    """agentRecord/ 中除 README.md 以外的文件属于任务记录，不是规范文件。"""
-    if "agentRecord" not in rel.parts:
+    """agentRecord/ 与 decisions/ 中除 README.md 以外的文件是任务记录、契约或 ADR，不是规范文件。"""
+    if not any(d in rel.parts for d in RECORD_DIRS):
         return False
 
     return rel.name != "README.md"
@@ -218,7 +221,7 @@ def cmd_set(root, raw_path, level):
     rel = Path(raw_path)
     _, specs = collect_files(root)
     if rel not in specs:
-        print(f"不是规范文件：{raw_path}（规范文件为 AGENTS.md 与 .agents/ 下除任务记录外的 Markdown）")
+        print(f"不是规范文件：{raw_path}（规范文件为 AGENTS.md 与 .agents/ 下除任务记录、契约和 ADR 外的 Markdown）")
         return 1
 
     try:

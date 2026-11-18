@@ -1,0 +1,6 @@
+name = {{AGENT_NAME_TOML}}
+description = {{AGENT_DESCRIPTION}}
+{{AGENT_MODEL_LINE}}
+developer_instructions = '''
+按 {{AGENT_SKILL_PATH}} 执行，并按该 skill 的路由选读规范。分派内容是本次的全部输入。
+'''
