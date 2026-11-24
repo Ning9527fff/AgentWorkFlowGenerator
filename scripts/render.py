@@ -31,13 +31,23 @@ LEVELS_PATH = ".agents/scripts/levels.json"
 CONFIG_COPY = ".agents/scripts/workflow-config.json"
 
 TIERS = ("轻量", "标准", "严格")
-BLOCKING = {"轻量": "P0、P1", "标准": "P0、P1、P2", "严格": "P0、P1、P2"}
+# 阻断级别由 blocking_levels 按档位和风格审查模式确定。
+BLOCKING_TO_P1 = "P0、P1"
+BLOCKING_TO_P2 = "P0、P1、P2"
 DEFAULT_GATE = {
-    "轻量": "整体完成后",
+    "轻量": "整体完成独立审查后",
     "标准": "每批任务完成独立审查后",
     "严格": "每个小任务完成独立审查后",
 }
 PENDING = "待确认"
+
+# 风格审查模式与档位相互独立：建议 = 风格问题不阻断；必改 = 风格问题也阻断。
+STYLE_REVIEWS = ("建议", "必改")
+DEFAULT_STYLE_REVIEW = {"轻量": "建议", "标准": "必改", "严格": "必改"}
+STYLE_SCOPE = {
+    True: "本次差异新增或修改的行（含测试代码）",
+    False: "本次差异新增或修改的行（不含测试代码）",
+}
 
 TOOLS = ("claude", "codex")
 INHERIT = "继承"
@@ -90,6 +100,8 @@ def load_config(path):
         raise ConfigError("配置有误：\n" + "\n".join(f"  - {e}" for e in errors))
 
     cfg.setdefault("gate", DEFAULT_GATE[cfg["tier"]])
+    cfg.setdefault("style_review", DEFAULT_STYLE_REVIEW[cfg["tier"]])
+    cfg.setdefault("style_review_tests", True)
     return cfg
 
 
@@ -99,6 +111,11 @@ def validate_basics(cfg, errors):
 
     if cfg.get("tier") not in TIERS:
         errors.append(f"tier 须为 {'、'.join(TIERS)} 之一")
+
+    if cfg.get("style_review", STYLE_REVIEWS[0]) not in STYLE_REVIEWS:
+        errors.append(f"style_review 须为 {'、'.join(STYLE_REVIEWS)} 之一")
+    if not isinstance(cfg.get("style_review_tests", True), bool):
+        errors.append("style_review_tests 须为 true 或 false")
 
     for key in ("replace", "skip", "existing_collab", "contract_docs", *TABLE_LISTS):
         if not isinstance(cfg.setdefault(key, []), list):
@@ -157,8 +174,8 @@ def validate_languages(cfg, config_dir, errors):
             except OSError as exc:
                 errors.append(f"{where}.style_rules_file 无法读取：{exc}")
 
-        if cfg.get("tier") in ("标准", "严格") and not lang.get("style_rules"):
-            errors.append(f"{where}：标准档和严格档须提供 style_rules 或 style_rules_file")
+        if not lang.get("style_rules"):
+            errors.append(f"{where}：须提供 style_rules 或 style_rules_file（所有档位都生成文字风格规则）")
 
         for item in lang.setdefault("plan_routes", []):
             if not isinstance(item, dict) or not all(item.get(k) for k in ("label", "title", "path")):
@@ -209,6 +226,16 @@ def iter_strings(value):
             yield from iter_strings(v)
 
 
+def blocking_levels(cfg):
+    """本项目的阻断级别。
+
+    风格必改时风格类 P3 会阻断；阻断线若停在 P1，更严重的 P2 反而放行，所以必改时至少到 P2。
+    """
+    if cfg["tier"] == "轻量" and cfg["style_review"] == "建议":
+        return BLOCKING_TO_P1
+    return BLOCKING_TO_P2
+
+
 def conditions(cfg):
     conds = {f"档位={cfg['tier']}", "多语言" if len(cfg["languages"]) > 1 else "单语言"}
     if cfg["high_risk_areas"]:
@@ -225,6 +252,16 @@ def conditions(cfg):
         conds.add("使用Claude")
     if "codex" in cfg["tools"]:
         conds.add("使用Codex")
+
+    style = f"风格{cfg['style_review']}"
+    conds.add(style)
+    if cfg["tier"] != "严格":
+        # 严格档另设风格审查职能；其余档位由代码审查职能核对风格
+        conds.add(f"代码审查{style}")
+
+    if "轻量升档" in conds and blocking_levels(cfg) == BLOCKING_TO_P1:
+        # 升档后按标准档的阈值阻断，比本项目平时多出 P2
+        conds.add("升档提高阻断")
     return conds
 
 
@@ -258,6 +295,7 @@ def plan_files(cfg, conds):
     files.append((".agents/agentRecord/README.md", "agent-record/README.md", None))
     files.append((".agents/agentRecord/_template.md", "agent-record/_template.md", None))
     files.append((".agents/agentRecord/_contract-template.md", "agent-record/_contract-template.md", None))
+    files.append((".agents/agentRecord/_autonomous-template.md", "agent-record/_autonomous-template.md", None))
 
     if "claude" in cfg["tools"]:
         files.append(("CLAUDE.md", "tools/CLAUDE.md", None))
@@ -386,7 +424,8 @@ def values(cfg, lang, conds):
         "PROJECT": cfg["project"],
         "TIER": cfg["tier"],
         "GATE": cfg["gate"],
-        "BLOCKING_LEVELS": BLOCKING[cfg["tier"]],
+        "BLOCKING_LEVELS": blocking_levels(cfg),
+        "STYLE_SCOPE": STYLE_SCOPE[cfg["style_review_tests"]],
         "CONTRACT_DOCS": "\n".join(
             f"- [{d['name']}](@@{d['path']}@@)：{d['scope']}" for d in cfg["contract_docs"]
         ) or f"- {PENDING}：扫描未找到业务契约文档；需要时由 Architect 向用户确认，确认后补入本页",
